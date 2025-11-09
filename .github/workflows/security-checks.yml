@@ -1,0 +1,122 @@
+name: Security Checks
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+  schedule:
+    # Run security checks daily at 2 AM UTC
+    - cron: '0 2 * * *'
+
+jobs:
+  security-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: './backend'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          severity: 'CRITICAL,HIGH'
+
+      - name: Upload Trivy results to GitHub Security
+        uses: github/codeql-action/upload-sarif@v2
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+  dependency-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        working-directory: ./backend
+        run: npm ci
+
+      - name: Run npm audit
+        working-directory: ./backend
+        run: npm audit --audit-level=moderate
+
+      - name: Check for outdated packages
+        working-directory: ./backend
+        run: npm outdated || true
+
+  code-quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        working-directory: ./backend
+        run: npm ci
+
+      - name: Run ESLint
+        working-directory: ./backend
+        run: npm run lint
+
+      - name: Check code formatting
+        working-directory: ./backend
+        run: npm run format:check
+
+      - name: Run TypeScript compiler
+        working-directory: ./backend
+        run: npm run build
+
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  docker-security:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service:
+          - api-gateway
+          - auth-service
+          - user-service
+          - wishlist-service
+          - feed-service
+          - notification-service
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Build Docker image
+        run: |
+          docker build \
+            -f backend/services/${{ matrix.service }}/Dockerfile.prod \
+            -t ${{ matrix.service }}:test \
+            backend
+
+      - name: Run Trivy on Docker image
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ matrix.service }}:test
+          format: 'table'
+          exit-code: '1'
+          severity: 'CRITICAL,HIGH'
