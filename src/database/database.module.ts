@@ -31,7 +31,7 @@ import {
         ],
         synchronize: config.get('DB_SYNCHRONIZE') === 'true',
         logging: config.get('DB_LOGGING') === 'true',
-        ssl: config.get('NODE_ENV') === 'production' ? { rejectUnauthorized: false } : false,
+        ssl: config.get('DB_SSL') === 'true' ? { rejectUnauthorized: false } : false,
       }),
     }),
   ],
