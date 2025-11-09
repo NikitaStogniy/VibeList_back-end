@@ -4,8 +4,6 @@ on:
   push:
     branches:
       - main
-    paths:
-      - 'VibeList_back-end/**'
   workflow_dispatch:
 
 env:
@@ -16,9 +14,6 @@ jobs:
   test:
     name: Run Tests
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: ./VibeList_back-end
 
     services:
       postgres:
@@ -54,7 +49,7 @@ jobs:
         with:
           node-version: '20'
           cache: 'npm'
-          cache-dependency-path: './VibeList_back-end/package-lock.json'
+          cache-dependency-path: 'package-lock.json'
 
       - name: Install dependencies
         run: npm ci
@@ -103,8 +98,8 @@ jobs:
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
         with:
-          context: ./VibeList_back-end
-          file: ./VibeList_back-end/Dockerfile
+          context: .
+          file: ./Dockerfile
           target: production
           push: true
           tags: ${{ steps.meta.outputs.tags }}
