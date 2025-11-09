@@ -222,14 +222,24 @@ jobs:
               --restart unless-stopped \
               ${IMAGE}
 
-            # Final health check
+            # Final health check (retry up to 5 times)
             echo "Performing final health check..."
-            sleep 5
-            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/api/v1/health || echo "000")
+            FINAL_CHECK_PASSED=false
+            for i in {1..5}; do
+              echo "Final health check attempt $i/5..."
+              sleep 5
+              HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/api/v1/health || echo "000")
 
-            if [ "$HTTP_CODE" = "200" ]; then
-              echo "=== DEPLOYMENT SUCCESSFUL ==="
+              if [ "$HTTP_CODE" = "200" ]; then
+                echo "=== DEPLOYMENT SUCCESSFUL ==="
+                FINAL_CHECK_PASSED=true
+                break
+              else
+                echo "Health check returned HTTP $HTTP_CODE, retrying..."
+              fi
+            done
 
+            if [ "$FINAL_CHECK_PASSED" = true ]; then
               # Cleanup old images (keep last 3)
               echo "Cleaning up old images..."
               docker image prune -af --filter "until=72h" || true
