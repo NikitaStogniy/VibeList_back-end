@@ -1,0 +1,265 @@
+name: Backend Deploy to Digital Ocean
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'VibeList_back-end/**'
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}/vibelist-backend
+
+jobs:
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./VibeList_back-end
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: vibelist_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: './VibeList_back-end/package-lock.json'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run linter
+        run: npm run lint
+
+      - name: Run tests
+        run: npm test
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/vibelist_test
+          REDIS_HOST: localhost
+          REDIS_PORT: 6379
+          NODE_ENV: test
+          JWT_SECRET: test-secret
+          JWT_REFRESH_SECRET: test-refresh-secret
+
+  build:
+    name: Build and Push Docker Image
+    runs-on: ubuntu-latest
+    needs: test
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,prefix=,format=long
+            type=raw,value=latest
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./VibeList_back-end
+          file: ./VibeList_back-end/Dockerfile
+          target: production
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+  deploy:
+    name: Deploy to Digital Ocean
+    runs-on: ubuntu-latest
+    needs: build
+    environment:
+      name: production
+      url: https://api.vibelist.app
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Deploy to Digital Ocean
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          GITHUB_SHA: ${{ github.sha }}
+          REGISTRY: ${{ env.REGISTRY }}
+          IMAGE_NAME: ${{ env.IMAGE_NAME }}
+        with:
+          host: ${{ secrets.DO_HOST }}
+          username: ${{ secrets.DO_USERNAME }}
+          key: ${{ secrets.DO_SSH_PRIVATE_KEY }}
+          envs: GITHUB_SHA,REGISTRY,IMAGE_NAME
+          script: |
+            # Set variables
+            IMAGE="${REGISTRY}/${IMAGE_NAME}:${GITHUB_SHA}"
+            CONTAINER_NAME="vibelist-backend"
+            NEW_CONTAINER_NAME="vibelist-backend-new"
+            NETWORK_NAME="vibelist-network"
+
+            echo "=== Starting deployment of ${IMAGE} ==="
+
+            # Login to GitHub Container Registry
+            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+            # Pull new image
+            echo "Pulling new image..."
+            docker pull ${IMAGE}
+
+            # Create network if it doesn't exist
+            docker network inspect ${NETWORK_NAME} >/dev/null 2>&1 || docker network create ${NETWORK_NAME}
+
+            # Run database migrations
+            echo "Running database migrations..."
+            docker run --rm \
+              --network ${NETWORK_NAME} \
+              --env-file /opt/vibelist/.env.production \
+              ${IMAGE} \
+              npm run migration:run || {
+                echo "Migration failed!"
+                exit 1
+              }
+
+            # Start new container on port 3001 (temporary)
+            echo "Starting new container..."
+            docker run -d \
+              --name ${NEW_CONTAINER_NAME} \
+              --network ${NETWORK_NAME} \
+              --env-file /opt/vibelist/.env.production \
+              -p 3001:3000 \
+              --restart unless-stopped \
+              ${IMAGE}
+
+            # Wait for container to be ready
+            echo "Waiting for new container to start..."
+            sleep 5
+
+            # Health check (10 attempts, 5 seconds between each)
+            echo "Performing health checks..."
+            HEALTH_CHECK_PASSED=false
+            for i in {1..10}; do
+              echo "Health check attempt $i/10..."
+              HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:3001/health || echo "000")
+
+              if [ "$HTTP_CODE" = "200" ]; then
+                echo "Health check passed!"
+                HEALTH_CHECK_PASSED=true
+                break
+              else
+                echo "Health check failed (HTTP $HTTP_CODE), retrying in 5 seconds..."
+                sleep 5
+              fi
+            done
+
+            if [ "$HEALTH_CHECK_PASSED" = false ]; then
+              echo "=== DEPLOYMENT FAILED: Health checks failed ==="
+              echo "Rolling back..."
+              docker stop ${NEW_CONTAINER_NAME}
+              docker rm ${NEW_CONTAINER_NAME}
+              exit 1
+            fi
+
+            # Health check passed - switch traffic
+            echo "=== Health checks passed, switching traffic ==="
+
+            # Stop old container if exists
+            if docker ps -a --format '{{.Names}}' | grep -Eq "^${CONTAINER_NAME}$"; then
+              echo "Stopping old container..."
+              docker stop ${CONTAINER_NAME}
+              docker rm ${CONTAINER_NAME}
+            fi
+
+            # Stop new container temporarily to rename it
+            docker stop ${NEW_CONTAINER_NAME}
+
+            # Rename new container to production name
+            docker rename ${NEW_CONTAINER_NAME} ${CONTAINER_NAME}
+
+            # Restart with production port (3000)
+            docker rm ${CONTAINER_NAME}
+            docker run -d \
+              --name ${CONTAINER_NAME} \
+              --network ${NETWORK_NAME} \
+              --env-file /opt/vibelist/.env.production \
+              -p 3000:3000 \
+              --restart unless-stopped \
+              ${IMAGE}
+
+            # Final health check
+            echo "Performing final health check..."
+            sleep 5
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/health || echo "000")
+
+            if [ "$HTTP_CODE" = "200" ]; then
+              echo "=== DEPLOYMENT SUCCESSFUL ==="
+
+              # Cleanup old images (keep last 3)
+              echo "Cleaning up old images..."
+              docker image prune -af --filter "until=72h" || true
+            else
+              echo "=== WARNING: Final health check failed but deployment completed ==="
+              exit 1
+            fi
+
+            # Logout from registry
+            docker logout ghcr.io
+
+      - name: Deployment Summary
+        if: success()
+        run: |
+          echo "### ✅ Deployment Successful" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Image:** \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Environment:** Production" >> $GITHUB_STEP_SUMMARY
+          echo "**Deployed at:** $(date -u)" >> $GITHUB_STEP_SUMMARY
+
+      - name: Deployment Failed
+        if: failure()
+        run: |
+          echo "### ❌ Deployment Failed" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Image:** \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Error:** Check the logs above for details" >> $GITHUB_STEP_SUMMARY
