@@ -23,6 +23,9 @@ import { WishlistModule } from './modules/wishlist/wishlist.module';
 import { FeedModule } from './modules/feed/feed.module';
 import { NotificationsModule } from './modules/notifications/notifications.module';
 
+// Controllers
+import { AppController } from './app.controller';
+
 @Module({
   imports: [
     // Config
@@ -72,5 +75,6 @@ import { NotificationsModule } from './modules/notifications/notifications.modul
     FeedModule,
     NotificationsModule,
   ],
+  controllers: [AppController],
 })
 export class AppModule {}

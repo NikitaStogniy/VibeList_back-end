@@ -23,7 +23,7 @@ NC='\033[0m' # No Color
 
 # Configuration
 DOMAIN="api.vibelist.cc"
-EMAIL="your-email@example.com"  # Change this to your email
+EMAIL="nikitastognii@gmail.com"  # Change this to your email
 NGINX_CONF="/etc/nginx/sites-available/vibelist"
 NGINX_ENABLED="/etc/nginx/sites-enabled/vibelist"
 
@@ -196,8 +196,8 @@ server {
         proxy_buffering off;
     }
 
-    location /health {
-        proxy_pass http://localhost:3000/health;
+    location /api/v1/health {
+        proxy_pass http://localhost:3000/api/v1/health;
         access_log off;
     }
 }
@@ -225,10 +225,10 @@ fi
 # Step 8: Test SSL certificate
 log_info "Step 8: Testing SSL certificate..."
 sleep 2
-if curl -s -o /dev/null -w "%{http_code}" https://${DOMAIN}/health | grep -q "200"; then
+if curl -s -o /dev/null -w "%{http_code}" https://${DOMAIN}/api/v1/health | grep -q "200"; then
     log_success "SSL is working! HTTPS endpoint is accessible"
 else
-    log_warning "Could not verify HTTPS endpoint. Check manually: https://${DOMAIN}/health"
+    log_warning "Could not verify HTTPS endpoint. Check manually: https://${DOMAIN}/api/v1/health"
 fi
 
 # Summary
@@ -236,7 +236,7 @@ echo ""
 log_success "=== Setup Complete ==="
 echo ""
 log_info "Your API is now available at: https://${DOMAIN}"
-log_info "Health check: https://${DOMAIN}/health"
+log_info "Health check: https://${DOMAIN}/api/v1/health"
 log_info "API docs: https://${DOMAIN}/api/docs"
 echo ""
 log_info "SSL certificate will auto-renew via cron job"
